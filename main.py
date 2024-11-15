@@ -1,9 +1,13 @@
 import os
+from flask import Flask, request, render_template_string, session
 from db_config import DatabaseManager
 from embedding_generator import EmbeddingGenerator
 from groq import Groq
 from langchain_community.document_loaders import PyPDFLoader
 from typing import List
+
+app = Flask(__name__)
+app.secret_key = os.urandom(24)  # Secret key for session management
 
 DATA_FILE_PATHS = ['PEPSI-2022-Presentation1.pdf', 'q1-2022-pep_transcript.pdf'] 
 
@@ -22,8 +26,7 @@ def load_text_samples(file_paths):
     
     return list(dict.fromkeys(filter(None, texts)))
 
-def generate_augmented_response(query: str, retrieved_items: List[tuple[str, float]]) :
-    
+def generate_augmented_response(query: str, retrieved_items: List[tuple[str, float]]):
     context = "\n\n".join(f"Document {idx + 1}:\n{text}" 
                          for idx, (text, _) in enumerate(retrieved_items))
     
@@ -53,41 +56,63 @@ def generate_augmented_response(query: str, retrieved_items: List[tuple[str, flo
 
     response = chat_completion.choices[0].message.content.strip()
     
-    # print(f"Generated Response: {response}")
-    
     return {
         "query": query,
         "generated_response": response
     }
 
-def main():
-    query_text = input("Enter your query: ")
-    db_manager = DatabaseManager()
-    embedding_gen = EmbeddingGenerator()
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    if request.method == 'POST':
+        query_text = request.form['query']
+        db_manager = DatabaseManager()
+        embedding_gen = EmbeddingGenerator()
 
-    db_manager.clear_embeddings()
+        db_manager.clear_embeddings()
 
-    texts = load_text_samples(DATA_FILE_PATHS)
-    processed_texts = set()
-    for idx, text in enumerate(texts):
-        if text in processed_texts:
-            continue
-        processed_texts.add(text)
+        texts = load_text_samples(DATA_FILE_PATHS)
+        processed_texts = set()
+        for idx, text in enumerate(texts):
+            if text in processed_texts:
+                continue
+            processed_texts.add(text)
+            
+            embedding = embedding_gen.generate_embedding(text)
+            db_manager.add_embedding_to_db(embedding, text_id=str(idx), text_content=text)
+            print(f"Added embedding for: {text}")  # Print added embedding to terminal
+
+        query_embedding = embedding_gen.generate_embedding(query_text)
+        similar_items = db_manager.search_similar_vectors(query_embedding, top_k=2)
+
+        result = generate_augmented_response(query_text, similar_items)
+        db_manager.close()
         
-        embedding = embedding_gen.generate_embedding(text)
-        db_manager.add_embedding_to_db(embedding, text_id=str(idx), text_content=text)
-        # print(f"Added embedding for: {text}")
+        # Print the result to the terminal
+        print(f"\nQuery Result:\nQuery: {result['query']}")
+        print(f"\nGenerated Response:\n{result['generated_response']}")
 
-    query_embedding = embedding_gen.generate_embedding(query_text)
-    similar_items = db_manager.search_similar_vectors(query_embedding, top_k=2)
+        # Store the result in the session
+        session['result'] = result
+        
+        # Render the result in the browser
+        return render_template_string('''
+            <h1>Query Result</h1>
+            <h2>Query: {{ result.query }}</h2>
+            <h3>Generated Response:</h3>
+            <p>{{ result.generated_response }}</p>
+            <form method="POST">
+                <input type="text" name="query" placeholder="Enter your next query" required>
+                <button type="submit">Submit</button>
+            </form>
+            <a href="/">Back</a>
+        ''', result=result)
 
-    result = generate_augmented_response(query_text, similar_items)
-    # print(result)
-    db_manager.close()
-    
-    print(f"\nQuery Result:\nQuery: {result['query']}")
-    print(f"\nGenerated Response:\n{result['generated_response']}")
-   
+    return '''
+        <form method="POST">
+            <input type="text" name="query" placeholder="Enter your query" required>
+            <button type="submit">Submit</button>
+        </form>
+    '''
 
 if __name__ == "__main__":
-    main()
+    app.run(debug=True)
